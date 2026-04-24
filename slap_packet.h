@@ -1,5 +1,6 @@
 #ifndef SLAP_PACKET_H
 #define SLAP_PACKET_H
+#include <string.h>  // for memcpy
 
 #include <stdint.h>
 #include <stdbool.h>  // For boolean data type (bool, true, false)

@@ -15,7 +15,7 @@
 
 
 /* ----------------------------------------------------------------
- * 1. RETURN TYPES
+ * 0. RETURN TYPES
  * ---------------------------------------------------------------- */
 #define OSAL_OK          0
 #define OSAL_ERR        -1
@@ -23,6 +23,12 @@
 #define OSAL_FULL       -3
 #define OSAL_EMPTY      -4
 
+/* ----------------------------------------------------------------
+ * 1. INIT
+ * ---------------------------------------------------------------- */
+
+/** Initialize the OSAL layer. Call before anything else. */
+void osal_init(void);
 
 /* ----------------------------------------------------------------
  * 2. TIME
@@ -193,11 +199,5 @@ void osal_watchdog_init(uint32_t timeout_ms);
 void osal_watchdog_kick(void);
 
 
-/* ----------------------------------------------------------------
- * 9. INIT
- * ---------------------------------------------------------------- */
-
-/** Initialize the OSAL layer. Call before anything else. */
-void osal_init(void);
 
 #endif /* OSAL_H */
