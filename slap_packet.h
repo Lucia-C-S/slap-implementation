@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>  // For boolean data type (bool, true, false)
+#include "slap_types.h" // For fixed-width types and other SLAP-specific types
 
 #define SLAP_MAX_SECONDARY 33 // max is either 9 bytes or file size to be downloaded
 #define SLAP_MAX_DATA 2039 // MTU = 2048 - primary header (4 bytes) - secondary header (max 3 bytes in the service message type calculation) - trailer (2 bytes)

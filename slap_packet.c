@@ -22,6 +22,16 @@ uint16_t slap_crc16(const uint8_t *data, uint16_t length)
     return crc;
     //based on polynomial x^16 + x^12 + x^5 + 1
 }
+/*
+ * Wire format (32-bit primary header, big-endian):
+ *  Bits [31:29] = packet_ver  (3)
+ *  Bits [28:22] = app_id      (7)
+ *  Bits [21:18] = svc_type    (4)
+ *  Bits [17:13] = msg_type    (5)
+ *  Bits [12:2]  = length     (11)
+ *  Bit  [1]     = ack         (1)
+ *  Bit  [0]     = ecf_flag    (1)
+ */
 
 int slap_encode_packet(slap_packet_t *pkt, uint8_t *buffer)
 {

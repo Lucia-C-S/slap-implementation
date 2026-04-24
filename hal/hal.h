@@ -12,4 +12,7 @@ int hal_send(uint8_t *data, uint16_t length);
 
 int hal_receive(uint8_t *buffer, uint16_t max_len);
 
-#endif
+/* Called from the transport ISR — implemented in hal.c */
+void hal_rx_complete_callback(uint16_t bytes_received);
+
+#endif /* HAL_H */
