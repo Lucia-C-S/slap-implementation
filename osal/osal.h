@@ -3,6 +3,11 @@
 #define OSAL_H
 
 #include <stdint.h>
+#include "osal_semaphore.h"
+#include "osal_mutex.h"
+#include "osal_eventgroup.h"
+#include "osal_queue.h"
+#include "osal_task.h"
 
 /* ================================================================
  * OSAL — Operating System Abstraction Layer for SLAP

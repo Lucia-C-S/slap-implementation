@@ -1,6 +1,6 @@
 // services/slap_service_time_management.c
-#include "slap_dispatcher.h"
-#include "slap_types.h"
+#include "../slap_dispatcher.h"
+#include "../slap_types.h"
 #include "osal.h"
 #include <string.h>
 

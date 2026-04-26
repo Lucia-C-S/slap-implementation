@@ -17,7 +17,12 @@ int slap_service_telecommand(slap_packet_t *req, slap_packet_t *resp)
         return SLAP_ERR_INVALID;
 
     /* Secondary header embedded in raw payload: tc_length(16b) */
-    uint16_t tc_len = ((uint16_t)req->data[0] << 8) | req->data[1];
+slap_secondary_header_t sec_in = {0};
+slap_sec_unpack(SLAP_SVC_TELECOMMAND, 1, req->data,
+                (uint8_t)req->data_len, &sec_in);
+uint16_t tc_len = sec_in.tc.tc_length;
+const char *tc_str = (const char *)(req->data + 2); /* 2 = wire size of 7.1 sec hdr */
+
 
     if (req->data_len < (uint16_t)(2 + tc_len))
         return SLAP_ERR_INVALID;

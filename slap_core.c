@@ -48,6 +48,10 @@ static osal_eventgroup_t g_slap_events;
 static osal_task_t g_rx_task;
 static osal_task_t g_sched_task;
 
+/* file scope: */
+static osal_queue_t g_rx_queue;
+
+
 /* Wire buffers: static (never on the stack).
  * Two separate buffers so TX can be built while RX is still valid. */
 static uint8_t g_rx_wire_buf[SLAP_MTU];
@@ -63,13 +67,14 @@ static uint8_t g_tx_wire_buf[SLAP_MTU];
  */
 static void run_one_cycle(void)
 {
-    /* Step 1: read raw bytes from the HAL transport layer.
-     * hal_receive() fills g_rx_wire_buf and returns byte count.
-     * Returns 0 or negative if nothing is available.              */
-    int rx_len = hal_receive(g_rx_wire_buf, (uint16_t)sizeof(g_rx_wire_buf));
-    if (rx_len <= 0)
-        return; /* spurious wake — nothing to process */
+    typedef struct { uint8_t data[SLAP_MTU]; uint16_t len; } rx_envelope_t;
+    rx_envelope_t env;
 
+    if (osal_queue_recv(&g_rx_queue, &env, 0) != OSAL_OK)
+        return; /* nothing in queue */
+
+    /* Use env.data and env.len instead of calling hal_receive() */
+    
     /* Step 2: allocate packet structs from the static pool.
      * NEVER declare slap_packet_t as a local variable — it is ~2 KB. */
     slap_packet_t *req  = slap_databank_alloc();
@@ -86,9 +91,7 @@ static void run_one_cycle(void)
 
     /* Step 3: deserialise wire bytes into the request struct.
      * Validates the CRC if ECF_FLAG is set.                        */
-    int decode_result = slap_decode_packet(g_rx_wire_buf,
-                                           (uint16_t)rx_len,
-                                           req);
+    int decode_result = slap_decode_packet(env.data, env.len, req);
     if (decode_result != SLAP_OK) {
         /* Packet is malformed or CRC failed — discard silently.
          * In a more mature implementation you would increment a
@@ -141,6 +144,8 @@ int slap_init(void)
     /* 4. Create synchronisation objects.                            */
     if (osal_sem_create_binary(&g_rx_sem, 0) != OSAL_OK)
         return SLAP_ERR_INVALID; /* starts locked — ISR will give it */
+    
+    osal_queue_create(&g_rx_queue, SLAP_CORE_QUEUE_DEPTH, SLAP_MTU);
 
     if (osal_eventgroup_create(&g_slap_events) != OSAL_OK)
         return SLAP_ERR_INVALID;
@@ -183,18 +188,23 @@ void slap_tick(void)
 
 void slap_core_notify_rx(const uint8_t *buf, uint16_t len)
 {
-    /* Called from the HAL ISR (DMA complete or UART RxCplt).
-     * We cannot call hal_receive() here — ISRs must be short.
-     * Just signal the rx task to wake up and do the work.
-     *
-     * Note: buf and len are currently unused here because
-     * hal_receive() re-reads the DMA buffer directly. In a more
-     * sophisticated implementation you would copy buf into a queue
-     * entry here for true zero-copy DMA ping-pong operation.       */
-    (void)buf;
-    (void)len;
+    /* Copy the received bytes into the queue.
+     * The queue holds up to SLAP_CORE_QUEUE_DEPTH complete packets.
+     * If full, the packet is dropped (ground station retries).     */
+
+    /* Pack buf + len into a small envelope */
+    typedef struct { uint8_t data[SLAP_MTU]; uint16_t len; } rx_envelope_t;
+
+    rx_envelope_t env;
+    if (len > SLAP_MTU) len = SLAP_MTU;
+    memcpy(env.data, buf, len);
+    env.len = len;
+
+    /* Non-blocking send — called from ISR context */
+    osal_queue_send(&g_rx_queue, &env, 0);
+
+    /* Wake the rx task */
     osal_sem_give_from_isr(&g_rx_sem);
-    osal_eventgroup_set_from_isr(&g_slap_events, SLAP_EVENT_RX_READY);
 }
 
 /* ----------------------------------------------------------------

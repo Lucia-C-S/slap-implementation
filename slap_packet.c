@@ -33,23 +33,48 @@ uint16_t slap_crc16(const uint8_t *data, uint16_t length)
  *  Bit  [0]     = ecf_flag    (1)
  */
 
-int slap_encode_packet(slap_packet_t *pkt, uint8_t *buffer)
+int slap_encode_packet(const slap_packet_t *pkt,
+                        uint8_t *buf, uint16_t buf_size)
 {
-    if (pkt->primary_header.length > SLAP_MAX_DATA) return -1;
+    /* Pack secondary header to a local wire buffer */
+    uint8_t sec_wire[SLAP_MAX_SEC_HEADER];
+    int sec_len = slap_sec_pack(
+        pkt->primary_header.service_type,
+        pkt->primary_header.msg_type,
+        &pkt->secondary_header,
+        sec_wire, sizeof(sec_wire)
+    );
+    if (sec_len < 0) return SLAP_ERR_INVALID;
 
-    uint8_t *p = buffer;
-    *p++ = pkt->primary_header.packet_ver;
-    *p++ = pkt->primary_header.app_id;
-    *p++ = pkt->primary_header.service_type;
-    *p++ = pkt->primary_header.msg_type;
-    *(uint16_t*)p = pkt->primary_header.length; p += 2;
-    *p++ = pkt->primary_header.ack;
-    *p++ = pkt->primary_header.ecf_flag;
-    memcpy(p, pkt->secondary_header, SLAP_MAX_SECONDARY); p += SLAP_MAX_SECONDARY;
-    memcpy(p, pkt->data, pkt->primary_header.length); p += pkt->primary_header.length;
-    uint16_t crc = slap_crc16(buffer, p - buffer);
-    *(uint16_t*)p = crc; p += 2;
-    return p - buffer;
+    uint16_t total = (uint16_t)(SLAP_PRIMARY_HDR_SIZE + sec_len
+                   + pkt->data_len
+                   + (pkt->primary_header.ecf_flag
+                      ? SLAP_TRAILER_SIZE : 0));
+
+    if (total > buf_size || total > SLAP_MTU)
+        return SLAP_ERR_OVERFLOW;
+
+    /* Write primary header with auto-filled length */
+    slap_primary_header_t hdr = pkt->primary_header;
+    hdr.length = total;
+    pack_primary_header(&hdr, buf);
+
+    uint16_t off = SLAP_PRIMARY_HDR_SIZE;
+    if (sec_len > 0) {
+        memcpy(buf + off, sec_wire, (uint16_t)sec_len);
+        off += (uint16_t)sec_len;
+    }
+    if (pkt->data_len > 0) {
+        memcpy(buf + off, pkt->data, pkt->data_len);
+        off += pkt->data_len;
+    }
+    if (pkt->primary_header.ecf_flag == SLAP_ECF_PRESENT) {
+        uint16_t crc = slap_crc16(buf, off);
+        buf[off]     = (uint8_t)(crc >> 8);
+        buf[off + 1] = (uint8_t)(crc);
+        off += 2;
+    }
+    return (int)off;
 }
 
 int slap_decode_packet(uint8_t *buffer, slap_packet_t *pkt, uint16_t buffer_len)
