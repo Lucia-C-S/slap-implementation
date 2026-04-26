@@ -42,7 +42,8 @@ int osal_sem_give_from_isr(osal_sem_t *sem)
     BaseType_t higher_prio_woken = pdFALSE;
     BaseType_t r = xSemaphoreGiveFromISR((SemaphoreHandle_t)*sem,
                                          &higher_prio_woken);
-    portYIELD_FROM_ISR(higher_prio_woken);
+    portYIELD_FROM_ISR(higher_prio_woken); //mechanism by which the HAL receive ISR immediately wakes the SLAP dispatch task instead of waiting for the next scheduler tick. Omitting it introduces latency measured in tick periods (typically 1–10 ms).
+
     return (r == pdTRUE) ? OSAL_OK : OSAL_ERR;
 }
 

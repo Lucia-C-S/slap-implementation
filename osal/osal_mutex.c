@@ -7,7 +7,7 @@
 int osal_mutex_create(osal_mutex_t *mtx)
 {
     // xSemaphoreCreateMutex includes priority inheritance
-    *mtx = (osal_mutex_t)xSemaphoreCreateMutex();
+    *mtx = (osal_mutex_t)xSemaphoreCreateMutex(); // use xSemaphoreCreateMutex(), not xSemaphoreCreateBinary(). The difference is priority inheritance — a mutex automatically elevates the priority of the task holding it when a higher-priority task is waiting. This prevents priority inversion, a class of real-time scheduling failure that has caused spacecraft anomalies
     return (*mtx != NULL) ? OSAL_OK : OSAL_ERR;
 }
 
