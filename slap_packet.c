@@ -46,7 +46,7 @@ int slap_encode_packet(const slap_packet_t *pkt,
     );
     if (sec_len < 0) return SLAP_ERR_INVALID;
 
-    uint16_t total = (uint16_t)(SLAP_PRIMARY_HDR_SIZE + sec_len
+    uint16_t total = (uint16_t)(SLAP_PRIMARY_HEADER_SIZE + sec_len
                    + pkt->data_len
                    + (pkt->primary_header.ecf_flag
                       ? SLAP_TRAILER_SIZE : 0));
@@ -59,7 +59,7 @@ int slap_encode_packet(const slap_packet_t *pkt,
     hdr.length = total;
     pack_primary_header(&hdr, buf);
 
-    uint16_t off = SLAP_PRIMARY_HDR_SIZE;
+    uint16_t off = SLAP_PRIMARY_HEADER_SIZE;
     if (sec_len > 0) {
         memcpy(buf + off, sec_wire, (uint16_t)sec_len);
         off += (uint16_t)sec_len;
@@ -79,7 +79,7 @@ int slap_encode_packet(const slap_packet_t *pkt,
 
 int slap_decode_packet(uint8_t *buffer, slap_packet_t *pkt, uint16_t buffer_len)
 {
-    if (buffer_len < 8 + SLAP_MAX_SECONDARY + 2) return -1;
+    if (buffer_len < 8 + SLAP_MAX_SEC_HEADER + 2) return -1;
 
     uint8_t *p = buffer;
     pkt->primary_header.packet_ver = *p++;
@@ -91,9 +91,9 @@ int slap_decode_packet(uint8_t *buffer, slap_packet_t *pkt, uint16_t buffer_len)
     pkt->primary_header.ecf_flag = *p++;
     if (pkt->primary_header.length > SLAP_MAX_DATA) return -1;
 
-    if (buffer_len < 8 + SLAP_MAX_SECONDARY + pkt->primary_header.length + 2) return -1;
+    if (buffer_len < 8 + SLAP_MAX_SEC_HEADER + pkt->primary_header.length + 2) return -1;
 
-    memcpy(pkt->secondary_header, p, SLAP_MAX_SECONDARY); p += SLAP_MAX_SECONDARY;
+    memcpy(pkt->secondary_header, p, SLAP_MAX_SEC_HEADER); p += SLAP_MAX_SEC_HEADER;
     memcpy(pkt->data, p, pkt->primary_header.length); p += pkt->primary_header.length;
     pkt->ecf = *(uint16_t*)p; p += 2;
     uint16_t crc = slap_crc16(buffer, p - buffer - 2);
