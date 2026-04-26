@@ -1,141 +1,277 @@
-// services/6_file_management.c
-#include "slap_dispatcher.h"
-#include "slap_types.h"
+/* services/6_file_management.c
+ *
+ * SLAP Service 6 — File Management (0x06)
+ *
+ * Provides remote management of on-board file systems (TRISKEL and
+ * PAYLOAD computer) through well-defined TC/TM exchanges. This service
+ * does NOT transfer file contents — it only manages file system metadata
+ * and structure. File content transfer uses Service 5 (LPT).
+ *
+ * All nodes implement a structured directory tree file system.
+ * All operations use the object path = repository path + file/dir name.
+ *
+ * Functional capabilities defined (§3.6):
+ *   ls   — directory listing (two-step: size → records)
+ *   mv   — file/directory move
+ *   cp   — file/directory copy
+ *   rm   — file/directory deletion
+ *   mkdir — directory creation
+ *
+ * 6.4 ls records report data format (per record, repeated):
+ *   entry_type (16b): 0=directory, 1=file
+ *   entry_size (64b): file size in bytes; 0 for directories
+ *   name_length (8b): byte length of the name string
+ *   name (N bytes):   UTF-8 name string (NOT null-terminated on wire)
+ *
+ * Application callbacks required (slap_app_interface.h):
+ *   fm_ls_size(), fm_ls_records(), fm_mv(), fm_cp(), fm_rm(), fm_mkdir()
+ */
+
+#include "../slap_dispatcher.h"
+#include "../slap_secondary_headers.h"
+#include "../slap_types.h"
+#include "../slap_app_interface.h"
 #include <string.h>
-#include <stdio.h>
 
-#define FM_MSG_LS_SIZE_REQ   1
-#define FM_MSG_LS_SIZE_RESP  2
-#define FM_MSG_LS_REC_REQ    3
-#define FM_MSG_LS_REC_RESP   4
-#define FM_MSG_MV_REQ        5
-#define FM_MSG_MV_ACK        6
-#define FM_MSG_CP_REQ        7
-#define FM_MSG_CP_ACK        8
-#define FM_MSG_RM_REQ        9
-#define FM_MSG_RM_ACK        10
-#define FM_MSG_MKDIR_REQ     11
-#define FM_MSG_MKDIR_ACK     12
+/* File Management message type identifiers (§3.6.1) */
+#define FM_MSG_LS_SIZE_REQ    1U
+#define FM_MSG_LS_SIZE_RESP   2U
+#define FM_MSG_LS_REC_REQ     3U
+#define FM_MSG_LS_REC_RESP    4U
+#define FM_MSG_MV_REQ         5U
+#define FM_MSG_MV_ACK         6U
+#define FM_MSG_CP_REQ         7U
+#define FM_MSG_CP_ACK         8U
+#define FM_MSG_RM_REQ         9U
+#define FM_MSG_RM_ACK         10U
+#define FM_MSG_MKDIR_REQ      11U
+#define FM_MSG_MKDIR_ACK      12U
 
-/* Application must implement these */
-extern int fm_ls_size(const char *path, uint32_t *list_size,
-                      uint16_t *num_dirs, uint16_t *num_files);
-extern int fm_ls_records(const char *path, uint8_t *buf,
-                         uint16_t max_len, uint16_t *written);
-extern int fm_mv(const char *src_path, const char *src_name,
-                 const char *dst_path, const char *dst_name);
-extern int fm_cp(const char *src_path, const char *src_name,
-                 const char *dst_path, const char *dst_name);
-extern int fm_rm(const char *path, const char *name);
-extern int fm_mkdir(const char *path, const char *dir_name);
+/* Maximum path and name lengths accepted from wire data.
+ * Must fit in stack-allocated buffers without overflow.             */
+#define FM_MAX_PATH_LEN   255U
+#define FM_MAX_NAME_LEN   127U
 
-static void build_fm_resp(slap_packet_t *resp, const slap_packet_t *req,
-                          uint8_t msg_type, uint8_t ack)
+/* ----------------------------------------------------------------
+ * INTERNAL HELPERS
+ * ---------------------------------------------------------------- */
+
+/* Build common fields for all File Management response headers */
+static void build_fm_resp(slap_packet_t *resp,
+                           const slap_packet_t *req,
+                           uint8_t msg_type, uint8_t ack)
 {
     resp->primary_header.packet_ver   = SLAP_PACKET_VER;
     resp->primary_header.app_id       = req->primary_header.app_id;
-    resp->primary_header.service_type = 0x06;
+    resp->primary_header.service_type = SLAP_SVC_FILE_MANAGEMENT;
     resp->primary_header.msg_type     = msg_type;
     resp->primary_header.ack          = ack;
     resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
+    resp->data_len                    = 0U;
 }
+
+/* Safely extract a path string from the wire payload into a fixed buffer.
+ * Returns SLAP_OK and fills buf[0..len] (null-terminated) on success.  */
+static int extract_string(const uint8_t *src, uint16_t str_len,
+                           char *buf, uint16_t buf_size)
+{
+    if (str_len >= buf_size) return SLAP_ERR_OVERFLOW;
+    memcpy(buf, src, str_len);
+    buf[str_len] = '\0';
+    return SLAP_OK;
+}
+
+/* ----------------------------------------------------------------
+ * SERVICE HANDLER
+ * ---------------------------------------------------------------- */
 
 int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
 {
     uint8_t msg = req->primary_header.msg_type;
+    slap_secondary_header_t sec_in  = {0};
+    slap_secondary_header_t sec_out = {0};
 
-    /* Helper: parse path from raw payload at given offset */
-    /* payload layout for ls/rm/mkdir: path_length(16b) | path(Mb) */
+    /* Unpack the secondary header from data[0..sec_in_len-1].
+     * Payload (path/name strings) follows at data[sec_in_len].     */
+    int sec_in_len = slap_sec_unpack(SLAP_SVC_FILE_MANAGEMENT,
+                                      msg, req->data,
+                                      (uint8_t)req->data_len, &sec_in);
+    if (sec_in_len < 0) return SLAP_ERR_INVALID;
 
-    if (msg == FM_MSG_LS_SIZE_REQ || msg == FM_MSG_LS_REC_REQ) {
-        if (req->data_len < 2) return SLAP_ERR_INVALID;
-        uint16_t path_len = ((uint16_t)req->data[0] << 8) | req->data[1];
-        if (req->data_len < (uint16_t)(2 + path_len)) return SLAP_ERR_INVALID;
+    const uint8_t *payload     = req->data + sec_in_len;
+    uint16_t       payload_len = req->data_len - (uint16_t)sec_in_len;
 
-        char path[256] = {0};
-        if (path_len < sizeof(path))
-            memcpy(path, req->data + 2, path_len);
+    /* Temporary string buffers — stack-allocated, bounded by FM_MAX_xxx */
+    char path[FM_MAX_PATH_LEN + 1U];
+    char name[FM_MAX_NAME_LEN + 1U];
+    char dst_path[FM_MAX_PATH_LEN + 1U];
+    char dst_name[FM_MAX_NAME_LEN + 1U];
 
-        if (msg == FM_MSG_LS_SIZE_REQ) {
-            uint32_t list_size = 0; uint16_t nd = 0, nf = 0;
-            if (fm_ls_size(path, &list_size, &nd, &nf) != SLAP_OK)
-                return SLAP_ERR_NODATA;
+    /* ----------------------------------------------------------
+     * MSG 6.1 — ls size request → 6.2 ls size report
+     *
+     * Ground requests: "how many files/dirs and how many bytes
+     * will the full directory listing of this path occupy?"
+     * Secondary header: path_length(16b)
+     * Data: path string
+     * Response 6.2 secondary header: list_size(32b) | num_dirs(16b) | num_files(16b)
+     * ---------------------------------------------------------- */
+    if (msg == FM_MSG_LS_SIZE_REQ) {
+        uint16_t pl = sec_in.fm_path.path_length;
+        if (payload_len < pl) return SLAP_ERR_INVALID;
+        if (extract_string(payload, pl, path, sizeof(path)) != SLAP_OK)
+            return SLAP_ERR_OVERFLOW;
 
-            build_fm_resp(resp, req, FM_MSG_LS_SIZE_RESP, SLAP_ACK);
-            /* Secondary header: list_size(32b) | num_dirs(16b) | num_files(16b) */
-            resp->secondary_header[0] = (uint8_t)(list_size >> 24);
-            resp->secondary_header[1] = (uint8_t)(list_size >> 16);
-            resp->secondary_header[2] = (uint8_t)(list_size >> 8);
-            resp->secondary_header[3] = (uint8_t)(list_size);
-            resp->secondary_header[4] = (uint8_t)(nd >> 8);
-            resp->secondary_header[5] = (uint8_t)(nd);
-            resp->secondary_header[6] = (uint8_t)(nf >> 8);
-            resp->secondary_header[7] = (uint8_t)(nf);
-            resp->sec_header_len = 8;
-            resp->data_len = 0;
-            return SLAP_OK;
-        }
+        uint32_t list_size  = 0U;
+        uint16_t num_dirs   = 0U;
+        uint16_t num_files  = 0U;
 
-        /* FM_MSG_LS_REC_REQ → FM_MSG_LS_REC_RESP */
-        build_fm_resp(resp, req, FM_MSG_LS_REC_RESP, SLAP_ACK);
-        resp->sec_header_len = 0;
-        uint16_t written = 0;
-        fm_ls_records(path, resp->data, SLAP_MAX_DATA, &written);
-        resp->data_len = written;
+        int r = fm_ls_size(path, &list_size, &num_dirs, &num_files);
+
+        build_fm_resp(resp, req, FM_MSG_LS_SIZE_RESP,
+                       (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
+
+        sec_out.fm_ls_size.list_size        = list_size;
+        sec_out.fm_ls_size.num_directories  = num_dirs;
+        sec_out.fm_ls_size.num_files        = num_files;
+        slap_sec_pack(SLAP_SVC_FILE_MANAGEMENT, FM_MSG_LS_SIZE_RESP,
+                       &sec_out, resp->secondary_header, SLAP_MAX_SEC_HEADER);
         return SLAP_OK;
     }
 
-    /* MV, CP: src_path_len(16b)|src_name_len(8b)|dst_path_len(16b)|dst_name_len(8b)|... */
-    if (msg == FM_MSG_MV_REQ || msg == FM_MSG_CP_REQ) {
-        if (req->data_len < 6) return SLAP_ERR_INVALID;
-        uint16_t spl = ((uint16_t)req->data[0] << 8) | req->data[1];
-        uint8_t  snl = req->data[2];
-        uint16_t dpl = ((uint16_t)req->data[3] << 8) | req->data[4];
-        uint8_t  dnl = req->data[5];
+    /* ----------------------------------------------------------
+     * MSG 6.3 — ls records request → 6.4 ls records report
+     *
+     * Ground requests the actual directory entries. The response
+     * data field contains records in the binary format described
+     * in the file header above. Large directories may require
+     * multiple 6.3/6.4 iterations (ground computes Nsegments
+     * from the 6.2 list_size).
+     *
+     * Secondary header: path_length(16b)
+     * Data: path string
+     * Response 6.4 data: packed records (no secondary header)
+     * ---------------------------------------------------------- */
+    if (msg == FM_MSG_LS_REC_REQ) {
+        uint16_t pl = sec_in.fm_path.path_length;
+        if (payload_len < pl) return SLAP_ERR_INVALID;
+        if (extract_string(payload, pl, path, sizeof(path)) != SLAP_OK)
+            return SLAP_ERR_OVERFLOW;
 
-        if (req->data_len < (uint16_t)(6 + spl + snl + dpl + dnl))
+        build_fm_resp(resp, req, FM_MSG_LS_REC_RESP, SLAP_ACK);
+
+        uint16_t written = 0U;
+        int r = fm_ls_records(path, resp->data, SLAP_MAX_DATA, &written);
+
+        if (r != SLAP_OK) {
+            resp->primary_header.ack = SLAP_NACK;
+            resp->data_len = 0U;
+        } else {
+            resp->data_len = written;
+        }
+        return SLAP_OK;
+    }
+
+    /* ----------------------------------------------------------
+     * MSG 6.5 — mv request → 6.6 mv acknowledgement report
+     *
+     * Move a file or directory from source to destination.
+     * Secondary header: src_path_len(16b) | src_name_len(8b) |
+     *                   dst_path_len(16b) | dst_name_len(8b)
+     * Data: src_path | src_name | dst_path | dst_name
+     * ---------------------------------------------------------- */
+    if (msg == FM_MSG_MV_REQ) {
+        uint16_t spl = sec_in.fm_mv_cp.src_path_length;
+        uint8_t  snl = sec_in.fm_mv_cp.src_file_name_length;
+        uint16_t dpl = sec_in.fm_mv_cp.dst_path_length;
+        uint8_t  dnl = sec_in.fm_mv_cp.dst_file_name_length;
+
+        if (payload_len < (uint16_t)(spl + snl + dpl + dnl))
             return SLAP_ERR_INVALID;
 
-        char sp[256]={0}, sn[128]={0}, dp[256]={0}, dn[128]={0};
-        uint16_t off = 6;
-        if (spl < sizeof(sp)) { memcpy(sp, req->data + off, spl); } off += spl;
-        if (snl < sizeof(sn)) { memcpy(sn, req->data + off, snl); } off += snl;
-        if (dpl < sizeof(dp)) { memcpy(dp, req->data + off, dpl); } off += dpl;
-        if (dnl < sizeof(dn)) { memcpy(dn, req->data + off, dnl); }
+        uint16_t off = 0U;
+        if (extract_string(payload + off, spl, path, sizeof(path))      != SLAP_OK) return SLAP_ERR_OVERFLOW; off += spl;
+        if (extract_string(payload + off, snl, name, sizeof(name))      != SLAP_OK) return SLAP_ERR_OVERFLOW; off += snl;
+        if (extract_string(payload + off, dpl, dst_path, sizeof(dst_path)) != SLAP_OK) return SLAP_ERR_OVERFLOW; off += dpl;
+        if (extract_string(payload + off, dnl, dst_name, sizeof(dst_name)) != SLAP_OK) return SLAP_ERR_OVERFLOW;
 
-        int r = (msg == FM_MSG_MV_REQ) ? fm_mv(sp, sn, dp, dn) : fm_cp(sp, sn, dp, dn);
-        uint8_t resp_msg = (msg == FM_MSG_MV_REQ) ? FM_MSG_MV_ACK : FM_MSG_CP_ACK;
-        build_fm_resp(resp, req, resp_msg, (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
-        resp->sec_header_len = 0;
-        resp->data_len = 0;
+        int r = fm_mv(path, name, dst_path, dst_name);
+        build_fm_resp(resp, req, FM_MSG_MV_ACK,
+                       (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }
 
-    /* RM: path_len(16b)|name_len(8b)|path|name */
+    /* ----------------------------------------------------------
+     * MSG 6.7 — cp request → 6.8 cp acknowledgement report
+     *
+     * Copy a file or directory. Identical layout to mv request.
+     * ---------------------------------------------------------- */
+    if (msg == FM_MSG_CP_REQ) {
+        uint16_t spl = sec_in.fm_mv_cp.src_path_length;
+        uint8_t  snl = sec_in.fm_mv_cp.src_file_name_length;
+        uint16_t dpl = sec_in.fm_mv_cp.dst_path_length;
+        uint8_t  dnl = sec_in.fm_mv_cp.dst_file_name_length;
+
+        if (payload_len < (uint16_t)(spl + snl + dpl + dnl))
+            return SLAP_ERR_INVALID;
+
+        uint16_t off = 0U;
+        if (extract_string(payload + off, spl, path, sizeof(path))         != SLAP_OK) return SLAP_ERR_OVERFLOW; off += spl;
+        if (extract_string(payload + off, snl, name, sizeof(name))         != SLAP_OK) return SLAP_ERR_OVERFLOW; off += snl;
+        if (extract_string(payload + off, dpl, dst_path, sizeof(dst_path)) != SLAP_OK) return SLAP_ERR_OVERFLOW; off += dpl;
+        if (extract_string(payload + off, dnl, dst_name, sizeof(dst_name)) != SLAP_OK) return SLAP_ERR_OVERFLOW;
+
+        int r = fm_cp(path, name, dst_path, dst_name);
+        build_fm_resp(resp, req, FM_MSG_CP_ACK,
+                       (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
+        return SLAP_OK;
+    }
+
+    /* ----------------------------------------------------------
+     * MSG 6.9 — rm request → 6.10 rm acknowledgement report
+     *
+     * Delete a file or directory identified by object path.
+     * Secondary header: path_length(16b) | name_length(8b)
+     * Data: path | name
+     * ---------------------------------------------------------- */
     if (msg == FM_MSG_RM_REQ) {
-        if (req->data_len < 3) return SLAP_ERR_INVALID;
-        uint16_t pl = ((uint16_t)req->data[0] << 8) | req->data[1];
-        uint8_t  nl = req->data[2];
-        char path[256]={0}, name[128]={0};
-        if (pl < sizeof(path)) memcpy(path, req->data + 3, pl);
-        if (nl < sizeof(name)) memcpy(name, req->data + 3 + pl, nl);
+        uint16_t pl = sec_in.fm_rm_mkdir.path_length;
+        uint8_t  nl = sec_in.fm_rm_mkdir.name_length;
+
+        if (payload_len < (uint16_t)(pl + nl)) return SLAP_ERR_INVALID;
+
+        if (extract_string(payload,      pl, path, sizeof(path)) != SLAP_OK)
+            return SLAP_ERR_OVERFLOW;
+        if (extract_string(payload + pl, nl, name, sizeof(name)) != SLAP_OK)
+            return SLAP_ERR_OVERFLOW;
+
         int r = fm_rm(path, name);
-        build_fm_resp(resp, req, FM_MSG_RM_ACK, (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
-        resp->sec_header_len = 0; resp->data_len = 0;
+        build_fm_resp(resp, req, FM_MSG_RM_ACK,
+                       (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }
 
-    /* MKDIR: path_len(16b)|dir_name_len(8b)|path|dir_name */
+    /* ----------------------------------------------------------
+     * MSG 6.11 — mkdir request → 6.12 mkdir acknowledgement report
+     *
+     * Create a new directory within an existing path.
+     * Secondary header: path_length(16b) | dir_name_length(8b)
+     * Data: path | dir_name
+     * ---------------------------------------------------------- */
     if (msg == FM_MSG_MKDIR_REQ) {
-        if (req->data_len < 3) return SLAP_ERR_INVALID;
-        uint16_t pl = ((uint16_t)req->data[0] << 8) | req->data[1];
-        uint8_t  nl = req->data[2];
-        char path[256]={0}, dname[128]={0};
-        if (pl < sizeof(path))  memcpy(path,  req->data + 3, pl);
-        if (nl < sizeof(dname)) memcpy(dname, req->data + 3 + pl, nl);
-        int r = fm_mkdir(path, dname);
-        build_fm_resp(resp, req, FM_MSG_MKDIR_ACK, (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
-        resp->sec_header_len = 0; resp->data_len = 0;
+        uint16_t pl = sec_in.fm_rm_mkdir.path_length;
+        uint8_t  nl = sec_in.fm_rm_mkdir.name_length;
+
+        if (payload_len < (uint16_t)(pl + nl)) return SLAP_ERR_INVALID;
+
+        if (extract_string(payload,      pl, path, sizeof(path)) != SLAP_OK)
+            return SLAP_ERR_OVERFLOW;
+        if (extract_string(payload + pl, nl, name, sizeof(name)) != SLAP_OK)
+            return SLAP_ERR_OVERFLOW;
+
+        int r = fm_mkdir(path, name);
+        build_fm_resp(resp, req, FM_MSG_MKDIR_ACK,
+                       (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }
 

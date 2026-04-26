@@ -19,12 +19,12 @@
  *   2048 − 4 (primary) − 3 (sec header 5.4) − 2 (ECF) = 2039 bytes
  *   But we use SLAP_MAX_DATA (2029) for conservative allocation.
  */
-
-#include "slap_dispatcher.h"
-#include "slap_secondary_headers.h"
-#include "slap_types.h"
-#include "slap_app_interface.h"
-#include "osal/osal.h"
+    
+#include "../slap_dispatcher.h"
+#include "../slap_secondary_headers.h"
+#include "../slap_types.h"
+#include "../slap_app_interface.h"
+#include "../osal/osal.h"
 #include <string.h>
 
 /* ----------------------------------------------------------------

@@ -1,175 +1,286 @@
-// services/4_time_based_scheduling.c
-#include "4_time_based_scheduling.h"
-#include "slap_types.h"
-#include "osal.h"
+/* services/slap_service_scheduling.c
+ *
+ * SLAP Service 4 — Time-Based Scheduling (0x04)
+ *
+ * Allows ground operators to pre-load telecommands on-board, each
+ * with a future release time. The scheduler executes them autonomously
+ * when the release time is reached, independently of ground contact.
+ *
+ * Schedule table: static array of SCHED_MAX_ENTRIES entries.
+ * Entry IDs: assigned on-board, start at 1, auto-increment.
+ * All times use CUC 4.2 format (7-byte big-endian binary counter).
+ *
+ * Transactions (§3.4.2):
+ *   4.3 Insert → 4.4 Insert report
+ *   4.5 Update release time   (no response)
+ *   4.1 Enable / 4.2 Disable  (echo same msg with ACK)
+ *   4.6 Reset                 (no response)
+ *   4.7 Table size req → 4.8 Table size report
+ *   loop ⌈list_size/SLAP_MAX_DATA⌉:
+ *     4.9 Table data req → 4.10 Table data report (CSV)
+ *
+ * Application callbacks required (slap_app_interface.h):
+ *   tc_execute() — execute a telecommand string immediately
+ *
+ * CSV format for 4.10 (§3.4.3):
+ *   EntryID,Telecommand,ReleaseTime\n  (one row per entry)
+ */
+
+#include "../slap_dispatcher.h"
+#include "../slap_secondary_headers.h"
+#include "../slap_types.h"
+#include "../slap_app_interface.h"
+#include "../osal/osal.h"
 #include <string.h>
-#include <stdio.h>  /* snprintf for CSV */
+#include <stdio.h>
 
-#define MSG_ENABLE          1
-#define MSG_DISABLE         2
-#define MSG_INSERT          3
-#define MSG_INSERT_REPORT   4
-#define MSG_UPDATE_RELEASE  5
-#define MSG_RESET           6
-#define MSG_TABLE_SIZE_REQ  7
-#define MSG_TABLE_SIZE_RESP 8
-#define MSG_TABLE_DATA_REQ  9
-#define MSG_TABLE_DATA_RESP 10
+/* Scheduling message type identifiers (§3.4.1) */
+#define SCHED_MSG_ENABLE       1U
+#define SCHED_MSG_DISABLE      2U
+#define SCHED_MSG_INSERT       3U
+#define SCHED_MSG_INSERT_RESP  4U
+#define SCHED_MSG_UPDATE       5U
+#define SCHED_MSG_RESET        6U
+#define SCHED_MSG_TBL_SZ_REQ   7U
+#define SCHED_MSG_TBL_SZ_RESP  8U
+#define SCHED_MSG_TBL_DATA_REQ 9U
+#define SCHED_MSG_TBL_DATA_RESP 10U
 
-static sched_entry_t g_schedule[SCHED_MAX_ENTRIES];
-static uint8_t       g_sched_enabled = 0;
-static uint16_t      g_next_entry_id = 1;
+/* Maximum number of simultaneous scheduled telecommands.
+ * Each entry consumes SCHED_TC_MAX_LEN bytes of static RAM.
+ * Total RAM for schedule table: SCHED_MAX_ENTRIES × (SCHED_TC_MAX_LEN + 12) */
+#define SCHED_MAX_ENTRIES  16U
+#define SCHED_TC_MAX_LEN   128U  /* max UTF-8 command string length in bytes */
 
-int slap_service_time_based_scheduling(slap_packet_t *req, slap_packet_t *resp)
+/* ----------------------------------------------------------------
+ * SCHEDULE TABLE ENTRY
+ * ---------------------------------------------------------------- */
+typedef struct {
+    uint16_t entry_id;                   /* on-board assigned unique ID  */
+    uint64_t release_time;               /* CUC 4.2 encoded as uint64_t  */
+    uint16_t tc_len;                     /* byte length of tc_str        */
+    char     tc_str[SCHED_TC_MAX_LEN];   /* null-terminated UTF-8 string */
+    uint8_t  valid;                      /* 1 = occupied, 0 = free slot  */
+} sched_entry_t;
+
+/* ----------------------------------------------------------------
+ * MODULE STATE
+ * ---------------------------------------------------------------- */
+static sched_entry_t g_schedule[SCHED_MAX_ENTRIES]; /* static table     */
+static uint8_t       g_sched_enabled = 0U;          /* 0=off, 1=running */
+static uint16_t      g_next_entry_id = 1U;          /* auto-increment   */
+
+/* ----------------------------------------------------------------
+ * INTERNAL HELPERS
+ * ---------------------------------------------------------------- */
+
+/* Pack a 7-byte CUC array into uint64_t for arithmetic comparisons.
+ * Encoding: bits[63:24] = coarse seconds, bits[23:0] = fine.       */
+static uint64_t cuc_to_u64(const uint8_t cuc[7])
+{
+    uint32_t coarse = ((uint32_t)cuc[0] << 24)
+                    | ((uint32_t)cuc[1] << 16)
+                    | ((uint32_t)cuc[2] <<  8)
+                    |  (uint32_t)cuc[3];
+    uint32_t fine   = ((uint32_t)cuc[4] << 16)
+                    | ((uint32_t)cuc[5] <<  8)
+                    |  (uint32_t)cuc[6];
+    return ((uint64_t)coarse << 24) | (uint64_t)fine;
+}
+
+/* Build common response header fields */
+static void build_sched_resp(slap_packet_t *resp,
+                              const slap_packet_t *req,
+                              uint8_t msg_type, uint8_t ack)
+{
+    resp->primary_header.packet_ver   = SLAP_PACKET_VER;
+    resp->primary_header.app_id       = req->primary_header.app_id;
+    resp->primary_header.service_type = SLAP_SVC_TIME_BASED_SCHEDULING;
+    resp->primary_header.msg_type     = msg_type;
+    resp->primary_header.ack          = ack;
+    resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
+    resp->data_len                    = 0U;
+}
+
+/* ----------------------------------------------------------------
+ * SERVICE HANDLER
+ * ---------------------------------------------------------------- */
+
+int slap_service_time_based_scheduling(slap_packet_t *req,
+                                        slap_packet_t *resp)
 {
     uint8_t msg = req->primary_header.msg_type;
+    slap_secondary_header_t sec_in  = {0};
+    slap_secondary_header_t sec_out = {0};
 
-    /* 4.1 Enable */
-    if (msg == MSG_ENABLE) {
-        g_sched_enabled = 1;
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = 0x04;
-        resp->primary_header.msg_type     = MSG_ENABLE;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-        resp->sec_header_len = 0;
-        resp->data_len       = 0;
+    /* Unpack secondary header (may be zero bytes for some messages) */
+    int sec_in_len = slap_sec_unpack(SLAP_SVC_TIME_BASED_SCHEDULING,
+                                      msg, req->data,
+                                      (uint8_t)req->data_len, &sec_in);
+    /* sec_in_len == 0 is valid for messages with no secondary header */
+    if (sec_in_len < 0) return SLAP_ERR_INVALID;
+
+    /* Pointer to actual payload data (after secondary header) */
+    const uint8_t *payload     = req->data + sec_in_len;
+    uint16_t       payload_len = req->data_len - (uint16_t)sec_in_len;
+
+    /* ----------------------------------------------------------
+     * MSG 4.1 — Enable time-based scheduling function
+     * MSG 4.2 — Disable time-based scheduling function
+     * Both echo the same message type back with ACK = 1.
+     * ---------------------------------------------------------- */
+    if (msg == SCHED_MSG_ENABLE || msg == SCHED_MSG_DISABLE) {
+        g_sched_enabled = (msg == SCHED_MSG_ENABLE) ? 1U : 0U;
+        build_sched_resp(resp, req, msg, SLAP_ACK);
         return SLAP_OK;
     }
 
-    /* 4.2 Disable */
-    if (msg == MSG_DISABLE) {
-        g_sched_enabled = 0;
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = 0x04;
-        resp->primary_header.msg_type     = MSG_DISABLE;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-        resp->sec_header_len = 0;
-        resp->data_len       = 0;
-        return SLAP_OK;
-    }
+    /* ----------------------------------------------------------
+     * MSG 4.3 — Insert telecommand into the time-based schedule
+     * Secondary header: release_time(56b CUC) + tc_length(16b)
+     * Data:             UTF-8 telecommand string
+     * Response 4.4:     entry_id(16b) in secondary header
+     * ---------------------------------------------------------- */
+    if (msg == SCHED_MSG_INSERT) {
+        uint16_t tc_len = sec_in.sched_insert.tc_length;
 
-    /* 4.3 Insert telecommand
-     * Secondary header (from raw data): release_time(7B) + tc_length(2B)
-     * Data: tc string */
-    if (msg == MSG_INSERT) {
-        if (req->data_len < 9)
+        /* Validate the TC string fits in the payload */
+        if (payload_len < tc_len || tc_len >= SCHED_TC_MAX_LEN)
             return SLAP_ERR_INVALID;
 
-        /* Parse secondary header embedded in raw payload */
-        uint64_t rel_time = 0;
-        for (int i = 0; i < 7; i++)
-            rel_time = (rel_time << 8) | req->data[i];
-        uint16_t tc_len = ((uint16_t)req->data[7] << 8) | req->data[8];
-
-        if (tc_len > SCHED_TC_MAX_LEN || req->data_len < (uint16_t)(9 + tc_len))
-            return SLAP_ERR_INVALID;
-
-        /* Find free slot */
+        /* Find a free slot in the static schedule table */
         int slot = -1;
-        for (int i = 0; i < SCHED_MAX_ENTRIES; i++) {
+        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
             if (!g_schedule[i].valid) { slot = i; break; }
         }
-        if (slot < 0)
-            return SLAP_ERR_NOMEM;
+        if (slot < 0) return SLAP_ERR_NOMEM; /* table full */
 
-        g_schedule[slot].entry_id    = g_next_entry_id++;
-        g_schedule[slot].release_time = rel_time;
-        g_schedule[slot].tc_len      = tc_len;
-        memcpy(g_schedule[slot].tc, req->data + 9, tc_len);
-        g_schedule[slot].tc[tc_len]  = '\0';
-        g_schedule[slot].valid       = 1;
+        /* Populate the entry */
+        g_schedule[slot].entry_id     = g_next_entry_id++;
+        g_schedule[slot].release_time = cuc_to_u64(
+                                         sec_in.sched_insert.release_time);
+        g_schedule[slot].tc_len       = tc_len;
+        memcpy(g_schedule[slot].tc_str, payload, tc_len);
+        g_schedule[slot].tc_str[tc_len] = '\0'; /* null-terminate */
+        g_schedule[slot].valid          = 1U;
 
-        /* Build 4.4 response: entry_id in secondary header */
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = 0x04;
-        resp->primary_header.msg_type     = MSG_INSERT_REPORT;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-        resp->secondary_header[0] = (uint8_t)(g_schedule[slot].entry_id >> 8);
-        resp->secondary_header[1] = (uint8_t)(g_schedule[slot].entry_id);
-        resp->sec_header_len = 2;
-        resp->data_len       = 0;
+        /* Build 4.4 Insert report: Entry_ID in secondary header */
+        sec_out.sched_receipt.entry_id = g_schedule[slot].entry_id;
+        int sl = slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
+                                SCHED_MSG_INSERT_RESP, &sec_out,
+                                resp->secondary_header, SLAP_MAX_SEC_HEADER);
+        if (sl < 0) return SLAP_ERR_INVALID;
+
+        build_sched_resp(resp, req, SCHED_MSG_INSERT_RESP, SLAP_ACK);
+        /* Re-apply secondary header after build_sched_resp cleared data_len */
+        slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
+                       SCHED_MSG_INSERT_RESP, &sec_out,
+                       resp->secondary_header, SLAP_MAX_SEC_HEADER);
         return SLAP_OK;
     }
 
-    /* 4.5 Update release time */
-    if (msg == MSG_UPDATE_RELEASE) {
-        if (req->data_len < 9)
-            return SLAP_ERR_INVALID;
-        uint16_t entry_id = ((uint16_t)req->data[0] << 8) | req->data[1];
-        uint64_t new_time = 0;
-        for (int i = 0; i < 7; i++)
-            new_time = (new_time << 8) | req->data[2 + i];
+    /* ----------------------------------------------------------
+     * MSG 4.5 — Update release time of a scheduled telecommand
+     * Secondary header: entry_id(16b) + release_time(56b CUC)
+     * release_time == 0 cancels and removes the telecommand.
+     * No response required.
+     * ---------------------------------------------------------- */
+    if (msg == SCHED_MSG_UPDATE) {
+        uint16_t target_id = sec_in.sched_update.entry_id;
+        uint64_t new_time  = cuc_to_u64(sec_in.sched_update.release_time);
 
-        for (int i = 0; i < SCHED_MAX_ENTRIES; i++) {
-            if (g_schedule[i].valid && g_schedule[i].entry_id == entry_id) {
-                if (new_time == 0)
-                    g_schedule[i].valid = 0; /* cancel */
-                else
+        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+            if (g_schedule[i].valid &&
+                g_schedule[i].entry_id == target_id) {
+                if (new_time == 0ULL) {
+                    /* Release time = 0 → cancel this command */
+                    g_schedule[i].valid = 0U;
+                } else {
                     g_schedule[i].release_time = new_time;
+                }
+                (void)resp;
                 return SLAP_OK;
             }
         }
-        return SLAP_ERR_INVALID;
+        return SLAP_ERR_INVALID; /* entry_id not found */
     }
 
-    /* 4.6 Reset */
-    if (msg == MSG_RESET) {
-        g_sched_enabled = 0;
+    /* ----------------------------------------------------------
+     * MSG 4.6 — Reset the time-based schedule
+     * 1. Set execution function to "disabled".
+     * 2. Delete all scheduled telecommands.
+     * No response required.
+     * ---------------------------------------------------------- */
+    if (msg == SCHED_MSG_RESET) {
+        g_sched_enabled = 0U;
         memset(g_schedule, 0, sizeof(g_schedule));
-        g_next_entry_id = 1;
+        g_next_entry_id = 1U;
+        (void)resp;
         return SLAP_OK;
     }
 
-    /* 4.7 Table size request → 4.8 */
-    if (msg == MSG_TABLE_SIZE_REQ) {
-        /* Build CSV to measure its size */
-        uint32_t csv_size = 0;
-        for (int i = 0; i < SCHED_MAX_ENTRIES; i++) {
-            if (g_schedule[i].valid)
-                csv_size += 10 + g_schedule[i].tc_len; /* rough estimate */
-        }
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = 0x04;
-        resp->primary_header.msg_type     = MSG_TABLE_SIZE_RESP;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-        resp->secondary_header[0] = (uint8_t)(csv_size >> 24);
-        resp->secondary_header[1] = (uint8_t)(csv_size >> 16);
-        resp->secondary_header[2] = (uint8_t)(csv_size >> 8);
-        resp->secondary_header[3] = (uint8_t)(csv_size);
-        resp->sec_header_len = 4;
-        resp->data_len       = 0;
-        return SLAP_OK;
-    }
-
-    /* 4.9 Table data request → 4.10 (returns one segment) */
-    if (msg == MSG_TABLE_DATA_REQ) {
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = 0x04;
-        resp->primary_header.msg_type     = MSG_TABLE_DATA_RESP;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-        resp->sec_header_len = 0;
-
-        uint16_t offset = 0;
-        for (int i = 0; i < SCHED_MAX_ENTRIES && offset < SLAP_MAX_DATA - 32; i++) {
+    /* ----------------------------------------------------------
+     * MSG 4.7 — Schedule table size request → 4.8 Table size report
+     * Computes the byte length of the complete CSV-encoded table.
+     * Ground uses List_size to calculate Nsegments for 4.9/4.10 loop.
+     * ---------------------------------------------------------- */
+    if (msg == SCHED_MSG_TBL_SZ_REQ) {
+        /* Calculate exact CSV byte count:
+         * Format per row: "entryID,tc_str,release_time\n"
+         * entry_id: up to 5 digits, release_time: up to 20 digits    */
+        uint32_t csv_size = 0U;
+        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
             if (!g_schedule[i].valid) continue;
-            int written = snprintf((char *)resp->data + offset,
-                                   SLAP_MAX_DATA - offset,
-                                   "%u,%s,%llu\n",
-                                   g_schedule[i].entry_id,
-                                   g_schedule[i].tc,
-                                   (unsigned long long)g_schedule[i].release_time);
-            if (written > 0) offset += (uint16_t)written;
+            /* Conservative estimate: 5 + 1 + tc_len + 1 + 20 + 1    */
+            csv_size += 5U + 1U + g_schedule[i].tc_len + 1U + 20U + 1U;
         }
+
+        sec_out.sched_tbl_size.list_size = csv_size;
+        slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
+                       SCHED_MSG_TBL_SZ_RESP, &sec_out,
+                       resp->secondary_header, SLAP_MAX_SEC_HEADER);
+        build_sched_resp(resp, req, SCHED_MSG_TBL_SZ_RESP, SLAP_ACK);
+        slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
+                       SCHED_MSG_TBL_SZ_RESP, &sec_out,
+                       resp->secondary_header, SLAP_MAX_SEC_HEADER);
+        return SLAP_OK;
+    }
+
+    /* ----------------------------------------------------------
+     * MSG 4.9 — Schedule table data request → 4.10 Table data report
+     * Encodes all valid schedule entries as CSV in data[].
+     * For large tables, the ground must iterate: send 4.9 as many
+     * times as Nsegments computed from the 4.8 response.
+     * This implementation returns all data in one packet; if it
+     * exceeds SLAP_MAX_DATA, the response is truncated and NACK is
+     * set — the ground must issue further 4.9 requests.
+     * ---------------------------------------------------------- */
+    if (msg == SCHED_MSG_TBL_DATA_REQ) {
+        uint16_t offset = 0U;
+        uint8_t  truncated = 0U;
+
+        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+            if (!g_schedule[i].valid) continue;
+
+            int written = snprintf(
+                (char *)resp->data + offset,
+                (size_t)(SLAP_MAX_DATA - offset),
+                "%u,%s,%llu\n",
+                (unsigned)g_schedule[i].entry_id,
+                g_schedule[i].tc_str,
+                (unsigned long long)g_schedule[i].release_time
+            );
+
+            if (written <= 0 ||
+                offset + (uint16_t)written >= SLAP_MAX_DATA) {
+                truncated = 1U;
+                break; /* no room for more entries in this packet */
+            }
+            offset += (uint16_t)written;
+        }
+
+        build_sched_resp(resp, req, SCHED_MSG_TBL_DATA_RESP,
+                          truncated ? SLAP_NACK : SLAP_ACK);
         resp->data_len = offset;
         return SLAP_OK;
     }
@@ -177,15 +288,28 @@ int slap_service_time_based_scheduling(slap_packet_t *req, slap_packet_t *resp)
     return SLAP_ERR_INVALID;
 }
 
-/* Call from a timer task — executes commands whose release time has arrived */
+/* ----------------------------------------------------------------
+ * SCHEDULING TICK — call from slap_sched_task_fn() every second
+ *
+ * Compares each valid entry's release_time against current time.
+ * Executes and removes any commands whose time has arrived.
+ *
+ * @param current_time  current time from osal_get_time_raw()
+ *                      (bits[63:24] = coarse seconds, [23:0] = fine)
+ * ---------------------------------------------------------------- */
 void slap_scheduling_tick(uint64_t current_time)
 {
     if (!g_sched_enabled) return;
-    for (int i = 0; i < SCHED_MAX_ENTRIES; i++) {
-        if (g_schedule[i].valid && g_schedule[i].release_time <= current_time) {
-            /* TODO: dispatch g_schedule[i].tc to your command executor */
-            g_schedule[i].valid = 0;
-        }
+
+    for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+        if (!g_schedule[i].valid) continue;
+        if (g_schedule[i].release_time > current_time) continue;
+
+        /* Release time has arrived — execute the telecommand */
+        tc_execute(g_schedule[i].tc_str,
+                   g_schedule[i].tc_len);
+
+        /* Remove from schedule regardless of execution result */
+        g_schedule[i].valid = 0U;
     }
 }
-
