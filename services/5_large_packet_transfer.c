@@ -25,6 +25,7 @@
 #include "../slap_types.h"
 #include "../slap_app_interface.h"
 #include "../osal/osal.h"
+#include "slap_service_defs.h"
 #include <string.h>
 
 /* ----------------------------------------------------------------
@@ -99,7 +100,7 @@ int slap_service_large_packet_transfer(slap_packet_t *req,
      * Ground requests file identified by path + filename.
      * We respond with file size (5.2) or NACK if not found.
      * ---------------------------------------------------------- */
-    if (msg == 1) {
+    if (msg == SLAP_MSG_LPT_DATA_REQ) {
         /* Extract path and filename from payload.
          * Layout: path (path_length bytes) | filename (file_name_length bytes) */
         uint16_t pl = sec_in.lpt_file_ref.path_length;
@@ -157,7 +158,7 @@ int slap_service_large_packet_transfer(slap_packet_t *req,
      * Ground requests one specific segment identified by seq_id.
      * We read that segment from the file and return it in 5.4.
      * ---------------------------------------------------------- */
-    if (msg == 3) {
+    if (msg == SLAP_MSG_LPT_SEGMENT_REQ) {
         if (!g_lpt_ctx.active)
             return SLAP_ERR_INVALID; /* no transfer in progress */
 
@@ -211,12 +212,12 @@ int slap_service_large_packet_transfer(slap_packet_t *req,
      * Ground signals that all segments were received.
      * We clear the context and send 5.6 ACK.
      * ---------------------------------------------------------- */
-    if (msg == 5) {
+    if (msg == SLAP_MSG_LPT_COMPLETE) {
         /* Clear transfer state */
         memset(&g_lpt_ctx, 0, sizeof(g_lpt_ctx));
 
         /* 5.6 completion ACK — no secondary header, no data */
-        build_lpt_resp_hdr(resp, req, 6, SLAP_ACK);
+        build_lpt_resp_hdr(resp, req, SLAP_MSG_LPT_COMPLETE, SLAP_ACK);
         resp->data_len = 0;
         return SLAP_OK;
     }

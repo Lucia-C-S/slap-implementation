@@ -36,8 +36,7 @@
 
 /* STM32 HAL for watchdog — replace with your MCU vendor header     */
 /* Replace placeholder: */
-#include "stm32f4xx_hal.h"   /* or stm32h7xx_hal.h — confirm your series */
-/* ================================================================
+#include "stm32h7xx_hal.h"   /* TRISKEL OBC confirmed: STM32H7 series *//* ================================================================
  * HARDWARE DEPENDENCIES
  * Implement these in your BSP (Board Support Package).
  * ================================================================ */

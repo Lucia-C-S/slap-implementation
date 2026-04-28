@@ -31,26 +31,9 @@
 #include "../slap_types.h"
 #include "../slap_app_interface.h"
 #include "../osal/osal.h"
+#include "slap_service_defs.h"
 #include <string.h>
 #include <stdio.h>
-
-/* Scheduling message type identifiers (§3.4.1) */
-#define SCHED_MSG_ENABLE       1U
-#define SCHED_MSG_DISABLE      2U
-#define SCHED_MSG_INSERT       3U
-#define SCHED_MSG_INSERT_RESP  4U
-#define SCHED_MSG_UPDATE       5U
-#define SCHED_MSG_RESET        6U
-#define SCHED_MSG_TBL_SZ_REQ   7U
-#define SCHED_MSG_TBL_SZ_RESP  8U
-#define SCHED_MSG_TBL_DATA_REQ 9U
-#define SCHED_MSG_TBL_DATA_RESP 10U
-
-/* Maximum number of simultaneous scheduled telecommands.
- * Each entry consumes SCHED_TC_MAX_LEN bytes of static RAM.
- * Total RAM for schedule table: SCHED_MAX_ENTRIES × (SCHED_TC_MAX_LEN + 12) */
-#define SCHED_MAX_ENTRIES  16U
-#define SCHED_TC_MAX_LEN   128U  /* max UTF-8 command string length in bytes */
 
 /* ----------------------------------------------------------------
  * SCHEDULE TABLE ENTRY
@@ -59,14 +42,14 @@ typedef struct {
     uint16_t entry_id;                   /* on-board assigned unique ID  */
     uint64_t release_time;               /* CUC 4.2 encoded as uint64_t  */
     uint16_t tc_len;                     /* byte length of tc_str        */
-    char     tc_str[SCHED_TC_MAX_LEN];   /* null-terminated UTF-8 string */
+    char     tc_str[SLAP_SCHED_TC_MAX_LEN];   /* null-terminated UTF-8 string */
     uint8_t  valid;                      /* 1 = occupied, 0 = free slot  */
 } sched_entry_t;
 
 /* ----------------------------------------------------------------
  * MODULE STATE
  * ---------------------------------------------------------------- */
-static sched_entry_t g_schedule[SCHED_MAX_ENTRIES]; /* static table     */
+static sched_entry_t g_schedule[SLAP_SCHED_MAX_ENTRIES]; /* static table     */
 static uint8_t       g_sched_enabled = 0U;          /* 0=off, 1=running */
 static uint16_t      g_next_entry_id = 1U;          /* auto-increment   */
 
@@ -129,8 +112,8 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
      * MSG 4.2 — Disable time-based scheduling function
      * Both echo the same message type back with ACK = 1.
      * ---------------------------------------------------------- */
-    if (msg == SCHED_MSG_ENABLE || msg == SCHED_MSG_DISABLE) {
-        g_sched_enabled = (msg == SCHED_MSG_ENABLE) ? 1U : 0U;
+    if (msg == SLAP_MSG_SCHED_ENABLE || msg == SLAP_MSG_SCHED_DISABLE) {
+        g_sched_enabled = (msg == SLAP_MSG_SCHED_ENABLE) ? 1U : 0U;
         build_sched_resp(resp, req, msg, SLAP_ACK);
         return SLAP_OK;
     }
@@ -141,16 +124,16 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
      * Data:             UTF-8 telecommand string
      * Response 4.4:     entry_id(16b) in secondary header
      * ---------------------------------------------------------- */
-    if (msg == SCHED_MSG_INSERT) {
+    if (msg == SLAP_MSG_SCHED_INSERT) {
         uint16_t tc_len = sec_in.sched_insert.tc_length;
 
         /* Validate the TC string fits in the payload */
-        if (payload_len < tc_len || tc_len >= SCHED_TC_MAX_LEN)
+        if (payload_len < tc_len || tc_len >= SLAP_SCHED_TC_MAX_LEN)
             return SLAP_ERR_INVALID;
 
         /* Find a free slot in the static schedule table */
         int slot = -1;
-        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+        for (int i = 0; i < (int)SLAP_SCHED_MAX_ENTRIES; i++) {
             if (!g_schedule[i].valid) { slot = i; break; }
         }
         if (slot < 0) return SLAP_ERR_NOMEM; /* table full */
@@ -167,14 +150,14 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
         /* Build 4.4 Insert report: Entry_ID in secondary header */
         sec_out.sched_receipt.entry_id = g_schedule[slot].entry_id;
         int sl = slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
-                                SCHED_MSG_INSERT_RESP, &sec_out,
+                                SLAP_MSG_SCHED_INSERT_RESP, &sec_out,
                                 resp->secondary_header, SLAP_MAX_SEC_HEADER);
         if (sl < 0) return SLAP_ERR_INVALID;
 
-        build_sched_resp(resp, req, SCHED_MSG_INSERT_RESP, SLAP_ACK);
+        build_sched_resp(resp, req, SLAP_MSG_SCHED_INSERT_RESP, SLAP_ACK);
         /* Re-apply secondary header after build_sched_resp cleared data_len */
         slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
-                       SCHED_MSG_INSERT_RESP, &sec_out,
+                       SLAP_MSG_SCHED_INSERT_RESP, &sec_out,
                        resp->secondary_header, SLAP_MAX_SEC_HEADER);
         return SLAP_OK;
     }
@@ -185,11 +168,11 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
      * release_time == 0 cancels and removes the telecommand.
      * No response required.
      * ---------------------------------------------------------- */
-    if (msg == SCHED_MSG_UPDATE) {
+    if (msg == SLAP_MSG_SCHED_UPDATE) {
         uint16_t target_id = sec_in.sched_update.entry_id;
         uint64_t new_time  = cuc_to_u64(sec_in.sched_update.release_time);
 
-        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+        for (int i = 0; i < (int)SLAP_SCHED_MAX_ENTRIES; i++) {
             if (g_schedule[i].valid &&
                 g_schedule[i].entry_id == target_id) {
                 if (new_time == 0ULL) {
@@ -211,7 +194,7 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
      * 2. Delete all scheduled telecommands.
      * No response required.
      * ---------------------------------------------------------- */
-    if (msg == SCHED_MSG_RESET) {
+    if (msg == SLAP_MSG_SCHED_RESET) {
         g_sched_enabled = 0U;
         memset(g_schedule, 0, sizeof(g_schedule));
         g_next_entry_id = 1U;
@@ -224,12 +207,12 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
      * Computes the byte length of the complete CSV-encoded table.
      * Ground uses List_size to calculate Nsegments for 4.9/4.10 loop.
      * ---------------------------------------------------------- */
-    if (msg == SCHED_MSG_TBL_SZ_REQ) {
+    if (msg == SLAP_MSG_SCHED_TBL_SZ_REQ) {
         /* Calculate exact CSV byte count:
          * Format per row: "entryID,tc_str,release_time\n"
          * entry_id: up to 5 digits, release_time: up to 20 digits    */
         uint32_t csv_size = 0U;
-        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+        for (int i = 0; i < (int)SLAP_SCHED_MAX_ENTRIES; i++) {
             if (!g_schedule[i].valid) continue;
             /* Conservative estimate: 5 + 1 + tc_len + 1 + 20 + 1    */
             csv_size += 5U + 1U + g_schedule[i].tc_len + 1U + 20U + 1U;
@@ -237,11 +220,11 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
 
         sec_out.sched_tbl_size.list_size = csv_size;
         slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
-                       SCHED_MSG_TBL_SZ_RESP, &sec_out,
+                       SLAP_MSG_SCHED_TBL_SZ_RESP, &sec_out,
                        resp->secondary_header, SLAP_MAX_SEC_HEADER);
-        build_sched_resp(resp, req, SCHED_MSG_TBL_SZ_RESP, SLAP_ACK);
+        build_sched_resp(resp, req, SLAP_MSG_SCHED_TBL_SZ_RESP, SLAP_ACK);
         slap_sec_pack(SLAP_SVC_TIME_BASED_SCHEDULING,
-                       SCHED_MSG_TBL_SZ_RESP, &sec_out,
+                       SLAP_MSG_SCHED_TBL_SZ_RESP, &sec_out,
                        resp->secondary_header, SLAP_MAX_SEC_HEADER);
         return SLAP_OK;
     }
@@ -255,11 +238,11 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
      * exceeds SLAP_MAX_DATA, the response is truncated and NACK is
      * set — the ground must issue further 4.9 requests.
      * ---------------------------------------------------------- */
-    if (msg == SCHED_MSG_TBL_DATA_REQ) {
+    if (msg == SLAP_MSG_SCHED_TBL_DATA_REQ) {
         uint16_t offset = 0U;
         uint8_t  truncated = 0U;
 
-        for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+        for (int i = 0; i < (int)SLAP_SCHED_MAX_ENTRIES; i++) {
             if (!g_schedule[i].valid) continue;
 
             int written = snprintf(
@@ -279,7 +262,7 @@ int slap_service_time_based_scheduling(slap_packet_t *req,
             offset += (uint16_t)written;
         }
 
-        build_sched_resp(resp, req, SCHED_MSG_TBL_DATA_RESP,
+        build_sched_resp(resp, req, SLAP_MSG_SCHED_TBL_DATA_RESP,
                           truncated ? SLAP_NACK : SLAP_ACK);
         resp->data_len = offset;
         return SLAP_OK;
@@ -301,7 +284,7 @@ void slap_scheduling_tick(uint64_t current_time)
 {
     if (!g_sched_enabled) return;
 
-    for (int i = 0; i < (int)SCHED_MAX_ENTRIES; i++) {
+    for (int i = 0; i < (int)SLAP_SCHED_MAX_ENTRIES; i++) {
         if (!g_schedule[i].valid) continue;
         if (g_schedule[i].release_time > current_time) continue;
 

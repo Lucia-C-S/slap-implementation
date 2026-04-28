@@ -29,16 +29,15 @@
 #include "../slap_secondary_headers.h"
 #include "../slap_types.h"
 #include "../slap_app_interface.h"
+#include "slap_service_defs.h"
 #include <string.h>
 
-/* Telecommand message type identifiers (§3.7.1) */
-#define TC_MSG_SEND  1U   /* 7.1 — ground → OBC: command to execute      */
-#define TC_MSG_ACK   2U   /* 7.2 — OBC → ground: echoed command + result */
+
 
 int slap_service_telecommand(slap_packet_t *req, slap_packet_t *resp)
 {
     /* Only 7.1 (Telecommand sending) is a valid inbound request */
-    if (req->primary_header.msg_type != TC_MSG_SEND)
+    if (req->primary_header.msg_type != SLAP_MSG_TC_SEND)
         return SLAP_ERR_INVALID;
 
     /* Unpack the secondary header (2 bytes: tc_length field) */
@@ -46,7 +45,7 @@ int slap_service_telecommand(slap_packet_t *req, slap_packet_t *resp)
     slap_secondary_header_t sec_out = {0};
 
     int sec_in_len = slap_sec_unpack(SLAP_SVC_TELECOMMAND,
-                                      TC_MSG_SEND,
+                                      SLAP_MSG_TC_SEND,
                                       req->data,
                                       (uint8_t)req->data_len,
                                       &sec_in);
@@ -73,14 +72,14 @@ int slap_service_telecommand(slap_packet_t *req, slap_packet_t *resp)
     resp->primary_header.packet_ver   = SLAP_PACKET_VER;
     resp->primary_header.app_id       = req->primary_header.app_id;
     resp->primary_header.service_type = SLAP_SVC_TELECOMMAND;
-    resp->primary_header.msg_type     = TC_MSG_ACK;
+    resp->primary_header.msg_type     = SLAP_MSG_TC_ACK;
     resp->primary_header.ack          = (exec_result == SLAP_OK)
                                        ? SLAP_ACK : SLAP_NACK;
     resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
 
     /* Secondary header: tc_length mirrors the received command length */
     sec_out.tc.tc_length = tc_len;
-    int sl = slap_sec_pack(SLAP_SVC_TELECOMMAND, TC_MSG_ACK,
+    int sl = slap_sec_pack(SLAP_SVC_TELECOMMAND, SLAP_MSG_TC_ACK,
                             &sec_out, resp->secondary_header,
                             SLAP_MAX_SEC_HEADER);
     if (sl < 0) return SLAP_ERR_INVALID;

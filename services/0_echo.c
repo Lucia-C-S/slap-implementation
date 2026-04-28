@@ -17,16 +17,13 @@
 
 #include "slap_dispatcher.h"
 #include "slap_types.h"
-
-/* Echo message type identifiers (§3.0.1) */
-#define ECHO_MSG_PING  1U   /* ground → OBC: "are you there?"          */
-#define ECHO_MSG_PONG  2U   /* OBC → ground: "yes, I am here"          */
+#include "slap_service_defs.h"
 
 int slap_service_echo(slap_packet_t *req, slap_packet_t *resp)
 {
     /* Only the Ping message type is a valid inbound request.
      * Any other message type is a protocol violation.               */
-    if (req->primary_header.msg_type != ECHO_MSG_PING)
+    if (req->primary_header.msg_type != SLAP_MSG_ECHO_PING)
         return SLAP_ERR_INVALID;
 
     /* Build the Pong response.
@@ -35,7 +32,7 @@ int slap_service_echo(slap_packet_t *req, slap_packet_t *resp)
     resp->primary_header.packet_ver   = SLAP_PACKET_VER;
     resp->primary_header.app_id       = req->primary_header.app_id;
     resp->primary_header.service_type = SLAP_SVC_ECHO;
-    resp->primary_header.msg_type     = ECHO_MSG_PONG;
+    resp->primary_header.msg_type     = SLAP_MSG_ECHO_PONG;
     resp->primary_header.ack          = SLAP_ACK;
     resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
     resp->data_len                    = 0;

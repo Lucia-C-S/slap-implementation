@@ -49,7 +49,7 @@ int main(void)
     tx->primary_header.msg_type     = 0x01;
     tx->primary_header.ack          = SLAP_NACK;
     tx->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-    tx->sec_header_len              = 0;
+    tx->sec_wire_len                = 0;
     tx->data_len                    = 0;
 
     int enc_len = slap_encode_packet(tx, wire, sizeof(wire));

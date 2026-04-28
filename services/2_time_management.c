@@ -31,12 +31,8 @@
 #include "../slap_types.h"
 #include "../osal/osal.h"
 #include "../hal/hal.h"
+#include "slap_service_defs.h"
 #include <string.h>
-
-/* Time Management message type identifiers (§3.2.1) */
-#define TM_MSG_SET_RATE    1U   /* 2.1 — configure autonomous report rate */
-#define TM_MSG_TIME_REPORT 2U   /* 2.2 — on-board time report             */
-#define TM_MSG_TIME_REQ    3U   /* 2.3 — request current on-board time    */
 
 /* ----------------------------------------------------------------
  * MODULE STATE
@@ -60,7 +56,7 @@ static void build_time_report(slap_packet_t *pkt, uint8_t dest_app_id)
     pkt->primary_header.packet_ver   = SLAP_PACKET_VER;
     pkt->primary_header.app_id       = dest_app_id;
     pkt->primary_header.service_type = SLAP_SVC_TIME_MANAGEMENT;
-    pkt->primary_header.msg_type     = TM_MSG_TIME_REPORT;
+    pkt->primary_header.msg_type     = SLAP_MSG_TM_TIME_REPORT;
     pkt->primary_header.ack          = SLAP_ACK;
     pkt->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
 
@@ -90,11 +86,11 @@ int slap_service_time_management(slap_packet_t *req, slap_packet_t *resp)
      * response was built. TODO: confirm with ground station team
      * whether an ACK response is expected.
      * ---------------------------------------------------------- */
-    if (msg == TM_MSG_SET_RATE) {
+    if (msg == SLAP_MSG_TM_SET_RATE) {
         slap_secondary_header_t sec_in = {0};
 
         int sl = slap_sec_unpack(SLAP_SVC_TIME_MANAGEMENT,
-                                  TM_MSG_SET_RATE,
+                                  SLAP_MSG_TM_SET_RATE,
                                   req->data,
                                   (uint8_t)req->data_len,
                                   &sec_in);
@@ -116,7 +112,7 @@ int slap_service_time_management(slap_packet_t *req, slap_packet_t *resp)
      * We respond with 2.2 which carries the 7-byte CUC timestamp
      * in data[] (no secondary header for 2.2 either).
      * ---------------------------------------------------------- */
-    if (msg == TM_MSG_TIME_REQ) {
+    if (msg == SLAP_MSG_TM_TIME_REQ) {
         build_time_report(resp, req->primary_header.app_id);
         return SLAP_OK;
     }

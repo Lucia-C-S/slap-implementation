@@ -31,26 +31,8 @@
 #include "../slap_secondary_headers.h"
 #include "../slap_types.h"
 #include "../slap_app_interface.h"
+#include "slap_service_defs.h"
 #include <string.h>
-
-/* File Management message type identifiers (§3.6.1) */
-#define FM_MSG_LS_SIZE_REQ    1U
-#define FM_MSG_LS_SIZE_RESP   2U
-#define FM_MSG_LS_REC_REQ     3U
-#define FM_MSG_LS_REC_RESP    4U
-#define FM_MSG_MV_REQ         5U
-#define FM_MSG_MV_ACK         6U
-#define FM_MSG_CP_REQ         7U
-#define FM_MSG_CP_ACK         8U
-#define FM_MSG_RM_REQ         9U
-#define FM_MSG_RM_ACK         10U
-#define FM_MSG_MKDIR_REQ      11U
-#define FM_MSG_MKDIR_ACK      12U
-
-/* Maximum path and name lengths accepted from wire data.
- * Must fit in stack-allocated buffers without overflow.             */
-#define FM_MAX_PATH_LEN   255U
-#define FM_MAX_NAME_LEN   127U
 
 /* ----------------------------------------------------------------
  * INTERNAL HELPERS
@@ -102,10 +84,10 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
     uint16_t       payload_len = req->data_len - (uint16_t)sec_in_len;
 
     /* Temporary string buffers — stack-allocated, bounded by FM_MAX_xxx */
-    char path[FM_MAX_PATH_LEN + 1U];
-    char name[FM_MAX_NAME_LEN + 1U];
-    char dst_path[FM_MAX_PATH_LEN + 1U];
-    char dst_name[FM_MAX_NAME_LEN + 1U];
+    char path[SLAP_FM_MAX_PATH_LEN + 1U];
+    char name[SLAP_FM_MAX_NAME_LEN + 1U];
+    char dst_path[SLAP_FM_MAX_PATH_LEN + 1U];
+    char dst_name[SLAP_FM_MAX_NAME_LEN + 1U];
 
     /* ----------------------------------------------------------
      * MSG 6.1 — ls size request → 6.2 ls size report
@@ -116,7 +98,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
      * Data: path string
      * Response 6.2 secondary header: list_size(32b) | num_dirs(16b) | num_files(16b)
      * ---------------------------------------------------------- */
-    if (msg == FM_MSG_LS_SIZE_REQ) {
+    if (msg == SLAP_MSG_FM_LS_SIZE_REQ) {
         uint16_t pl = sec_in.fm_path.path_length;
         if (payload_len < pl) return SLAP_ERR_INVALID;
         if (extract_string(payload, pl, path, sizeof(path)) != SLAP_OK)
@@ -128,13 +110,13 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
 
         int r = fm_ls_size(path, &list_size, &num_dirs, &num_files);
 
-        build_fm_resp(resp, req, FM_MSG_LS_SIZE_RESP,
+        build_fm_resp(resp, req, SLAP_MSG_FM_LS_SIZE_RESP,
                        (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
 
         sec_out.fm_ls_size.list_size        = list_size;
         sec_out.fm_ls_size.num_directories  = num_dirs;
         sec_out.fm_ls_size.num_files        = num_files;
-        slap_sec_pack(SLAP_SVC_FILE_MANAGEMENT, FM_MSG_LS_SIZE_RESP,
+        slap_sec_pack(SLAP_SVC_FILE_MANAGEMENT, SLAP_MSG_FM_LS_SIZE_RESP,
                        &sec_out, resp->secondary_header, SLAP_MAX_SEC_HEADER);
         return SLAP_OK;
     }
@@ -152,13 +134,13 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
      * Data: path string
      * Response 6.4 data: packed records (no secondary header)
      * ---------------------------------------------------------- */
-    if (msg == FM_MSG_LS_REC_REQ) {
+    if (msg == SLAP_MSG_FM_LS_REC_REQ) {
         uint16_t pl = sec_in.fm_path.path_length;
         if (payload_len < pl) return SLAP_ERR_INVALID;
         if (extract_string(payload, pl, path, sizeof(path)) != SLAP_OK)
             return SLAP_ERR_OVERFLOW;
 
-        build_fm_resp(resp, req, FM_MSG_LS_REC_RESP, SLAP_ACK);
+        build_fm_resp(resp, req, SLAP_MSG_FM_LS_REC_RESP, SLAP_ACK);
 
         uint16_t written = 0U;
         int r = fm_ls_records(path, resp->data, SLAP_MAX_DATA, &written);
@@ -180,7 +162,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
      *                   dst_path_len(16b) | dst_name_len(8b)
      * Data: src_path | src_name | dst_path | dst_name
      * ---------------------------------------------------------- */
-    if (msg == FM_MSG_MV_REQ) {
+    if (msg == SLAP_MSG_FM_MV_REQ) {
         uint16_t spl = sec_in.fm_mv_cp.src_path_length;
         uint8_t  snl = sec_in.fm_mv_cp.src_file_name_length;
         uint16_t dpl = sec_in.fm_mv_cp.dst_path_length;
@@ -196,7 +178,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
         if (extract_string(payload + off, dnl, dst_name, sizeof(dst_name)) != SLAP_OK) return SLAP_ERR_OVERFLOW;
 
         int r = fm_mv(path, name, dst_path, dst_name);
-        build_fm_resp(resp, req, FM_MSG_MV_ACK,
+        build_fm_resp(resp, req, SLAP_MSG_FM_MV_ACK,
                        (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }
@@ -206,7 +188,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
      *
      * Copy a file or directory. Identical layout to mv request.
      * ---------------------------------------------------------- */
-    if (msg == FM_MSG_CP_REQ) {
+    if (msg == SLAP_MSG_FM_CP_REQ) {
         uint16_t spl = sec_in.fm_mv_cp.src_path_length;
         uint8_t  snl = sec_in.fm_mv_cp.src_file_name_length;
         uint16_t dpl = sec_in.fm_mv_cp.dst_path_length;
@@ -222,7 +204,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
         if (extract_string(payload + off, dnl, dst_name, sizeof(dst_name)) != SLAP_OK) return SLAP_ERR_OVERFLOW;
 
         int r = fm_cp(path, name, dst_path, dst_name);
-        build_fm_resp(resp, req, FM_MSG_CP_ACK,
+        build_fm_resp(resp, req, SLAP_MSG_FM_CP_ACK,
                        (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }
@@ -234,7 +216,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
      * Secondary header: path_length(16b) | name_length(8b)
      * Data: path | name
      * ---------------------------------------------------------- */
-    if (msg == FM_MSG_RM_REQ) {
+    if (msg == SLAP_MSG_FM_RM_REQ) {
         uint16_t pl = sec_in.fm_rm_mkdir.path_length;
         uint8_t  nl = sec_in.fm_rm_mkdir.name_length;
 
@@ -246,7 +228,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
             return SLAP_ERR_OVERFLOW;
 
         int r = fm_rm(path, name);
-        build_fm_resp(resp, req, FM_MSG_RM_ACK,
+        build_fm_resp(resp, req, SLAP_MSG_FM_RM_ACK,
                        (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }
@@ -258,7 +240,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
      * Secondary header: path_length(16b) | dir_name_length(8b)
      * Data: path | dir_name
      * ---------------------------------------------------------- */
-    if (msg == FM_MSG_MKDIR_REQ) {
+    if (msg == SLAP_MSG_FM_MKDIR_REQ) {
         uint16_t pl = sec_in.fm_rm_mkdir.path_length;
         uint8_t  nl = sec_in.fm_rm_mkdir.name_length;
 
@@ -270,7 +252,7 @@ int slap_service_file_management(slap_packet_t *req, slap_packet_t *resp)
             return SLAP_ERR_OVERFLOW;
 
         int r = fm_mkdir(path, name);
-        build_fm_resp(resp, req, FM_MSG_MKDIR_ACK,
+        build_fm_resp(resp, req, SLAP_MSG_FM_MKDIR_ACK,
                        (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK);
         return SLAP_OK;
     }

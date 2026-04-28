@@ -22,8 +22,8 @@ static const slap_service_handler_t dispatch_table[] =
 
 int slap_dispatch_packet(slap_packet_t *req, slap_packet_t *resp)
 {
-    if (req->primary_header.service_type > 7)
-        return -1; // “I could NOT process this packet”
+   if (req->primary_header.service_type >= SLAP_NUM_SERVICES)
+        return SLAP_ERR_INVALID; /* “I could NOT process this packet” */
 
     return dispatch_table[req->primary_header.service_type](req, resp);
 }

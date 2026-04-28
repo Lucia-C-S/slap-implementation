@@ -4,16 +4,6 @@
 
 #include "slap_packet.h"
 
-/* HK type values */
-#define HK_TYPE_TELEMETRY  0
-#define HK_TYPE_LOG        1
-
-/* Message types */
-#define HK_MSG_AVAIL_REQ   1
-#define HK_MSG_AVAIL_RESP  2
-#define HK_MSG_PKT_REQ     3
-#define HK_MSG_PKT_SEND    4
-
 /* Secondary header for 1.1, 1.3 (request messages): 10 bits = 2 bytes packed */
 typedef struct {
     uint8_t hk_type;      /* 1 bit */

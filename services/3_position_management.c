@@ -36,15 +36,8 @@
 #include "../slap_types.h"
 #include "../osal/osal.h"
 #include "../slap_app_interface.h"
+#include "slap_service_defs.h"
 #include <string.h>
-
-/* Position Management message type identifiers (§3.3.1) */
-#define POS_MSG_REQUEST  1U   /* 3.1 — ground requests current position */
-#define POS_MSG_REPORT   2U   /* 3.2 — OBC reports position + velocity  */
-
-/* Expected size of the position payload returned by position_get():
- * 6 × float32 = 24 bytes (ECI J2000 state vector)                    */
-#define POS_STATE_VECTOR_BYTES  24U
 
 /* ----------------------------------------------------------------
  * FLOAT SERIALISATION HELPERS
@@ -82,7 +75,7 @@ int slap_service_position_management(slap_packet_t *req,
                                       slap_packet_t *resp)
 {
     /* Only the Position Request message type is a valid inbound request */
-    if (req->primary_header.msg_type != POS_MSG_REQUEST)
+    if (req->primary_header.msg_type != SLAP_MSG_POS_REQUEST)
         return SLAP_ERR_INVALID;
 
     /* Neither 3.1 nor 3.2 have a secondary header (§3.3.1).
@@ -90,7 +83,7 @@ int slap_service_position_management(slap_packet_t *req,
     resp->primary_header.packet_ver   = SLAP_PACKET_VER;
     resp->primary_header.app_id       = req->primary_header.app_id;
     resp->primary_header.service_type = SLAP_SVC_POSITION_MANAGEMENT;
-    resp->primary_header.msg_type     = POS_MSG_REPORT;
+    resp->primary_header.msg_type     = SLAP_MSG_POS_REPORT;
     resp->primary_header.ack          = SLAP_ACK;
     resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
     resp->data_len                    = 0U;
@@ -107,7 +100,7 @@ int slap_service_position_management(slap_packet_t *req,
                           (uint16_t)(SLAP_MAX_DATA - 7U),
                           &written);
 
-    if (r != SLAP_OK || written != POS_STATE_VECTOR_BYTES) {
+    if (r != SLAP_OK || written != SLAP_POS_STATE_VECTOR_BYTES) {
         /* Position data unavailable (SGP4 not initialised, ADCS fault) */
         resp->primary_header.ack = SLAP_NACK;
         resp->data_len = 7U; /* timestamp only — position is zeroed */
@@ -134,7 +127,7 @@ int slap_position_parse_report(const uint8_t *data, uint16_t data_len,
                                 float *x,  float *y,  float *z,
                                 float *vx, float *vy, float *vz)
 {
-    if (data_len < (uint16_t)(7U + POS_STATE_VECTOR_BYTES))
+    if (data_len < (uint16_t)(7U + SLAP_POS_STATE_VECTOR_BYTES))
         return SLAP_ERR_INVALID;
 
     if (ts_out != NULL)

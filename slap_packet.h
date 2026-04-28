@@ -3,7 +3,6 @@
 #include <string.h>  // for memcpy
 
 #include <stdint.h>
-#include <stdbool.h>  // For boolean data type (bool, true, false)
 #include "slap_types.h" // For fixed-width types and other SLAP-specific types
 #include "slap_secondary_headers.h" // For secondary header definitions
 
@@ -47,8 +46,8 @@ typedef struct {
 
 /* ---------------- API ---------------- */
 
-int slap_encode_packet(slap_packet_t *pkt, uint8_t *buffer);
-int slap_decode_packet(uint8_t *buffer, slap_packet_t *pkt, uint16_t buffer_len);
+int slap_encode_packet(const slap_packet_t *pkt, uint8_t *buf, uint16_t buf_size);
+int slap_decode_packet(uint8_t *buffer, uint16_t buffer_len, slap_packet_t *pkt);
 
 /* CRC */
 uint16_t slap_crc16(const uint8_t *data, uint16_t length);

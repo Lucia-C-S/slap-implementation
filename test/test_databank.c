@@ -72,7 +72,7 @@ int main(void)
     slap_packet_t *clean = slap_databank_alloc();
     assert(clean != NULL);
     assert(clean->data_len == 0);
-    assert(clean->sec_header_len == 0);
+    assert(clean->sec_wire_len == 0);
     assert(clean->primary_header.service_type == 0);
     printf("[PASS] freshly allocated slot is zero-initialised\n");
     slap_databank_free(clean);

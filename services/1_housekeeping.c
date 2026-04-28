@@ -3,6 +3,8 @@
 #include "../slap_types.h"
 #include "../slap_secondary_headers.h"
 #include "1_housekeeping.h"
+#include "slap_service_defs.h"
+
 #include "osal.h"
 #include <string.h>
 
@@ -33,7 +35,7 @@ int slap_service_housekeeping(slap_packet_t *req, slap_packet_t *resp)
     if (sec_in_len < 0) return SLAP_ERR_INVALID;
 
     /* -- 1.1 Available packet request → 1.2 Available packet report -- */
-    if (msg == 1) {
+    if (msg == SLAP_MSG_HK_AVAIL_REQ) {
         uint32_t avail = 0;
         if (hk_get_available_size(sec_in.hk_req.hk_type,
                                    sec_in.hk_req.historical,
@@ -44,7 +46,7 @@ int slap_service_housekeeping(slap_packet_t *req, slap_packet_t *resp)
         resp->primary_header.packet_ver   = SLAP_PACKET_VER;
         resp->primary_header.app_id       = req->primary_header.app_id;
         resp->primary_header.service_type = SLAP_SVC_HOUSEKEEPING;
-        resp->primary_header.msg_type     = 2;
+        resp->primary_header.msg_type     = SLAP_MSG_HK_AVAIL_RESP;
         resp->primary_header.ack          = SLAP_ACK;
         resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
 
@@ -62,11 +64,11 @@ int slap_service_housekeeping(slap_packet_t *req, slap_packet_t *resp)
     }
 
     /* -- 1.3 Packet request → 1.4 Packet sending -- */
-    if (msg == 3) {
+    if (msg == SLAP_MSG_HK_PKT_REQ) {
         resp->primary_header.packet_ver   = SLAP_PACKET_VER;
         resp->primary_header.app_id       = req->primary_header.app_id;
         resp->primary_header.service_type = SLAP_SVC_HOUSEKEEPING;
-        resp->primary_header.msg_type     = 4;
+        resp->primary_header.msg_type     = SLAP_MSG_HK_PKT_SEND;
         resp->primary_header.ack          = SLAP_ACK;
         resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
 
