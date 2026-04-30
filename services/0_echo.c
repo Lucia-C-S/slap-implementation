@@ -35,7 +35,7 @@ int slap_service_echo(slap_packet_t *req, slap_packet_t *resp)
     resp->primary_header.msg_type     = SLAP_MSG_ECHO_PONG;
     resp->primary_header.ack          = SLAP_ACK;
     resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-    resp->data_len                    = 0;
+    resp->data_len                    = 0U;
     /* sec_header_len is not needed — slap_sec_pack(SVC_ECHO, msg)
      * returns 0 and writes nothing, so secondary_header[] is unused. */
 

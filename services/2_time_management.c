@@ -46,26 +46,6 @@
  * a future version, save to non-volatile memory here.
  * ---------------------------------------------------------------- */
 static uint32_t g_time_report_rate = 0U;
-
-/* ----------------------------------------------------------------
- * INTERNAL HELPER — build a 2.2 Time Report packet
- * Used both for responses to 2.3 and for autonomous broadcasts.
- * ---------------------------------------------------------------- */
-static void build_time_report(slap_packet_t *pkt, uint8_t dest_app_id)
-{
-    pkt->primary_header.packet_ver   = SLAP_PACKET_VER;
-    pkt->primary_header.app_id       = dest_app_id;
-    pkt->primary_header.service_type = SLAP_SVC_TIME_MANAGEMENT;
-    pkt->primary_header.msg_type     = SLAP_MSG_TM_TIME_REPORT;
-    pkt->primary_header.ack          = SLAP_ACK;
-    pkt->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-
-    /* 2.2 has no secondary header — on-board time goes directly in data[].
-     * osal_get_time_cuc() fills 7 bytes: [0..3] coarse, [4..6] fine.  */
-    osal_get_time_cuc(pkt->data);
-    pkt->data_len = 7U;
-}
-
 /* ----------------------------------------------------------------
  * SERVICE HANDLER
  * ---------------------------------------------------------------- */
@@ -87,19 +67,9 @@ int slap_service_time_management(slap_packet_t *req, slap_packet_t *resp)
      * whether an ACK response is expected.
      * ---------------------------------------------------------- */
     if (msg == SLAP_MSG_TM_SET_RATE) {
-        slap_secondary_header_t sec_in = {0};
-
-        int sl = slap_sec_unpack(SLAP_SVC_TIME_MANAGEMENT,
-                                  SLAP_MSG_TM_SET_RATE,
-                                  req->data,
-                                  (uint8_t)req->data_len,
-                                  &sec_in);
-        if (sl < 0) return SLAP_ERR_INVALID;
-
-        g_time_report_rate = sec_in.time_rate.generation_rate;
-        /* 0 = disabled, non-zero = period in seconds */
-
-        /* No response required per spec */
+         g_time_report_rate =
+            req->secondary_header.time_rate.generation_rate;
+        /* No response — return OK without populating resp */
         (void)resp;
         return SLAP_OK;
     }
@@ -113,10 +83,20 @@ int slap_service_time_management(slap_packet_t *req, slap_packet_t *resp)
      * in data[] (no secondary header for 2.2 either).
      * ---------------------------------------------------------- */
     if (msg == SLAP_MSG_TM_TIME_REQ) {
-        build_time_report(resp, req->primary_header.app_id);
+        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
+        resp->primary_header.app_id       = req->primary_header.app_id;
+        resp->primary_header.service_type = SLAP_SVC_TIME_MANAGEMENT;
+        resp->primary_header.msg_type     = SLAP_MSG_TM_TIME_REPORT;
+        resp->primary_header.ack          = SLAP_ACK;
+        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
+ 
+        /* 2.2 has no secondary header — time goes straight into data[] */
+        osal_get_time_cuc(resp->data);
+        resp->data_len = 7U;
+ 
         return SLAP_OK;
     }
-
+ 
     return SLAP_ERR_INVALID;
 }
 
@@ -146,19 +126,21 @@ void slap_time_broadcast(uint8_t *tx_buf, uint16_t buf_size)
 
     /* Allocate a temporary packet struct from the static pool.
      * NEVER declare slap_packet_t as a local variable.           */
-    extern slap_packet_t *slap_databank_alloc(void);
-    extern void slap_databank_free(slap_packet_t *);
-
     slap_packet_t *pkt = slap_databank_alloc();
-    if (pkt == NULL) return; /* pool exhausted — skip this broadcast */
-
-    /* Broadcast destination: APP_ID = 0x00 (all nodes) */
-    build_time_report(pkt, 0x00U);
-
-    /* Encode and transmit */
-    int tx_len = slap_encode_packet(pkt, tx_buf, buf_size);
-    if (tx_len > 0)
-        hal_send(tx_buf, (uint16_t)tx_len);
-
+    if (pkt == NULL) return; /* pool exhausted — skip this tick */
+ 
+    pkt->primary_header.packet_ver   = SLAP_PACKET_VER;
+    pkt->primary_header.app_id       = 0x00U; /* broadcast */
+    pkt->primary_header.service_type = SLAP_SVC_TIME_MANAGEMENT;
+    pkt->primary_header.msg_type     = SLAP_MSG_TM_TIME_REPORT;
+    pkt->primary_header.ack          = SLAP_ACK;
+    pkt->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
+    osal_get_time_cuc(pkt->data);
+    pkt->data_len = 7U;
+ 
+    int len = slap_encode_packet(pkt, tx_buf, buf_size);
+    if (len > 0)
+        hal_send(tx_buf, (uint16_t)len);
+ 
     slap_databank_free(pkt);
 }

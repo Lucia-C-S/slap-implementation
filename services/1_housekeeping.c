@@ -36,68 +36,64 @@ int slap_service_housekeeping(slap_packet_t *req, slap_packet_t *resp)
 
     /* -- 1.1 Available packet request → 1.2 Available packet report -- */
     if (msg == SLAP_MSG_HK_AVAIL_REQ) {
-        uint32_t avail = 0;
-        if (hk_get_available_size(sec_in.hk_req.hk_type,
-                                   sec_in.hk_req.historical,
-                                   sec_in.hk_req.param_id,
-                                   &avail) != SLAP_OK)
-            return SLAP_ERR_NODATA;
-
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = SLAP_SVC_HOUSEKEEPING;
-        resp->primary_header.msg_type     = SLAP_MSG_HK_AVAIL_RESP;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-
-        sec_out.hk_avail.hk_type    = sec_in.hk_req.hk_type;
-        sec_out.hk_avail.historical = sec_in.hk_req.historical;
-        sec_out.hk_avail.param_id   = sec_in.hk_req.param_id;
-        sec_out.hk_avail.avail_size = avail;
-        osal_get_time_cuc(sec_out.hk_avail.timestamp);
-
-        int sl = slap_sec_pack(SLAP_SVC_HOUSEKEEPING, 2, &sec_out,
-                                resp->secondary_header, SLAP_MAX_SEC_HEADER);
-        if (sl < 0) return SLAP_ERR_INVALID;
-        resp->data_len = 0;
+                uint32_t avail_bytes = 0U;
+ 
+        int r = hk_get_available_size(
+                    req->secondary_header.hk_req.hk_type,
+                    req->secondary_header.hk_req.historical,
+                    req->secondary_header.hk_req.param_id,
+                    &avail_bytes);
+ 
+        resp->primary_header.msg_type = SLAP_MSG_HK_AVAIL_RESP;
+        resp->primary_header.ack      = (r == SLAP_OK) ? SLAP_ACK : SLAP_NACK;
+ 
+        /* Write directly into the union member — no slap_sec_pack call.
+         * slap_encode_packet will call slap_sec_pack on this after return. */
+        resp->secondary_header.hk_avail.hk_type    =
+            req->secondary_header.hk_req.hk_type;
+        resp->secondary_header.hk_avail.historical =
+            req->secondary_header.hk_req.historical;
+        resp->secondary_header.hk_avail.param_id   =
+            req->secondary_header.hk_req.param_id;
+        resp->secondary_header.hk_avail.avail_size = avail_bytes;
+        osal_get_time_cuc(resp->secondary_header.hk_avail.timestamp);
+ 
         return SLAP_OK;
     }
 
     /* -- 1.3 Packet request → 1.4 Packet sending -- */
     if (msg == SLAP_MSG_HK_PKT_REQ) {
-        resp->primary_header.packet_ver   = SLAP_PACKET_VER;
-        resp->primary_header.app_id       = req->primary_header.app_id;
-        resp->primary_header.service_type = SLAP_SVC_HOUSEKEEPING;
-        resp->primary_header.msg_type     = SLAP_MSG_HK_PKT_SEND;
-        resp->primary_header.ack          = SLAP_ACK;
-        resp->primary_header.ecf_flag     = SLAP_ECF_PRESENT;
-
-        sec_out.hk_send.hk_type    = sec_in.hk_req.hk_type;
-        sec_out.hk_send.historical = sec_in.hk_req.historical;
-        sec_out.hk_send.param_id   = sec_in.hk_req.param_id;
-        osal_get_time_cuc(sec_out.hk_send.timestamp);
-
-        int sl = slap_sec_pack(SLAP_SVC_HOUSEKEEPING, 4, &sec_out,
-                                resp->secondary_header, SLAP_MAX_SEC_HEADER);
-        if (sl < 0) return SLAP_ERR_INVALID;
-
-        uint16_t written = 0;
-        int r = hk_read_data(sec_in.hk_req.hk_type,
-                              sec_in.hk_req.historical,
-                              sec_in.hk_req.param_id,
-                              resp->data, SLAP_MAX_DATA, &written);
+        resp->primary_header.msg_type = SLAP_MSG_HK_PKT_SEND;
+ 
+        resp->secondary_header.hk_send.hk_type    =
+            req->secondary_header.hk_req.hk_type;
+        resp->secondary_header.hk_send.historical =
+            req->secondary_header.hk_req.historical;
+        resp->secondary_header.hk_send.param_id   =
+            req->secondary_header.hk_req.param_id;
+        osal_get_time_cuc(resp->secondary_header.hk_send.timestamp);
+ 
+        uint16_t written = 0U;
+        int r = hk_read_data(
+                    req->secondary_header.hk_req.hk_type,
+                    req->secondary_header.hk_req.historical,
+                    req->secondary_header.hk_req.param_id,
+                    resp->data,
+                    SLAP_MAX_DATA,
+                    &written);
+ 
         if (r != SLAP_OK) {
             resp->primary_header.ack = SLAP_NACK;
-            resp->data_len = 0;
+            resp->data_len           = 0U;
         } else {
-            resp->data_len = written;
-            /* Signal truncation if data was larger than one packet */
-            if (written == SLAP_MAX_DATA)
-                resp->primary_header.ack = SLAP_NACK; /* more data pending */
+            resp->data_len           = written;
+            /* Full buffer means there may be more — signal pending data */
+            resp->primary_header.ack = (written == SLAP_MAX_DATA)
+                                      ? SLAP_NACK : SLAP_ACK;
         }
         return SLAP_OK;
     }
-
+ 
     return SLAP_ERR_INVALID;
 }
 
